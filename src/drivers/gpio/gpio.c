@@ -148,6 +148,7 @@ struct gpio_irq_handler {
 	void *data;
 	void (*handler)(void *);
 	struct dlist_head link;
+	struct dlist_head link_pending;
 };
 
 static int gpio_lthread_irq_hnd(struct lthread *self);
@@ -186,6 +187,8 @@ int gpio_irq_attach(unsigned short port, uint32_t pin,
 	gpio_hnd->data = data;
 	gpio_hnd->handler = pin_handler;
 
+	dlist_head_init(&gpio_hnd->link_pending);
+
 	DO_IPL_LOCKED(
 		dlist_add_next(dlist_head_init(&gpio_hnd->link), &gpio_irq_list);
 	);
@@ -221,14 +224,12 @@ int gpio_irq_detach(unsigned short port, uint32_t pin) {
 static int gpio_lthread_irq_hnd(struct lthread *self) {
 	struct gpio_irq_handler *gpio_hnd;
 
-	dlist_foreach_entry_safe(gpio_hnd, &gpio_pending_irq_list, link) {
-		gpio_hnd->handler(gpio_hnd->data);
-
-		/* Move handler back to gpio list. */
+	dlist_foreach_entry_safe(gpio_hnd, &gpio_pending_irq_list, link_pending) {
 		DO_IPL_LOCKED(
-			dlist_del(&gpio_hnd->link);
-			dlist_add_prev(&gpio_hnd->link, &gpio_irq_list);
+			dlist_del_init(&gpio_hnd->link_pending);
 		);
+
+		gpio_hnd->handler(gpio_hnd->data);
 	}
 
 	return 0;
@@ -245,13 +246,13 @@ void gpio_handle_irq(struct gpio_chip *chip, uint8_t port, gpio_mask_t pins) {
 					&& (gpio_hnd->port == port)
 					&& (gpio_hnd->pin  == (1 << pin))) {
 
-				/* Move handler to pending list to be processed in lthread. */
+				/* Add handler to pending list to be processed in lthread. */
 				DO_IPL_LOCKED(
-					dlist_del(&gpio_hnd->link);
-					dlist_add_prev(&gpio_hnd->link, &gpio_pending_irq_list);
+					if (gpio_hnd->link_pending.prev == &gpio_hnd->link_pending && gpio_hnd->link_pending.next == &gpio_hnd->link_pending) {
+						dlist_add_prev(&gpio_hnd->link_pending, &gpio_pending_irq_list);
+						pending = 1;
+					}
 				);
-
-				pending = 1;
 			}
 		}
 	}
